@@ -1,29 +1,114 @@
 import sys
 import os
-import io
 import zipfile
 import filetype
-import fitz  # PyMuPDF
-import docx  # python-docx
+import fitz
+import docx
+import markdown
+from xhtml2pdf import pisa
 from PIL import Image
+import qtawesome as qta
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFileDialog, QComboBox, QProgressBar, QMessageBox
+    QPushButton, QLabel, QFileDialog, QComboBox, QProgressBar, QMessageBox,
+    QGroupBox, QFrame
 )
-from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QThread, Signal, Qt, QSize
+from PySide6.QtGui import QFont, QIcon
 
-# Mapping of what source formats can be converted into
+# --- Modern Dark Theme Stylesheet ---
+STYLESHEET = """
+QMainWindow {
+    background-color: #1e1e2e;
+}
+QLabel {
+    color: #cdd6f4;
+    font-size: 13px;
+}
+QGroupBox {
+    color: #bac2de;
+    border: 1px solid #313244;
+    border-radius: 8px;
+    margin-top: 12px;
+    font-weight: bold;
+    padding-top: 15px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 15px;
+    padding: 0 5px;
+}
+QPushButton {
+    background-color: #313244;
+    color: #cdd6f4;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-weight: bold;
+    border: none;
+}
+QPushButton:hover {
+    background-color: #45475a;
+}
+QPushButton#convertBtn {
+    background-color: #89b4fa;
+    color: #11111b;
+    font-size: 15px;
+    padding: 12px;
+    border-radius: 8px;
+}
+QPushButton#convertBtn:hover {
+    background-color: #b4befe;
+}
+QPushButton#convertBtn:disabled {
+    background-color: #313244;
+    color: #585b70;
+}
+QComboBox {
+    background-color: #313244;
+    color: #cdd6f4;
+    border-radius: 4px;
+    padding: 6px 10px;
+    border: 1px solid #45475a;
+}
+QComboBox:disabled {
+    background-color: #181825;
+    color: #45475a;
+    border: 1px solid #313244;
+}
+QComboBox::drop-down {
+    border: none;
+}
+QProgressBar {
+    border: 1px solid #313244;
+    border-radius: 6px;
+    text-align: center;
+    color: #cdd6f4;
+    background-color: #181825;
+    font-weight: bold;
+}
+QProgressBar::chunk {
+    background-color: #a6e3a1;
+    border-radius: 5px;
+}
+#dropZone {
+    border: 2px dashed #45475a;
+    border-radius: 10px;
+    background-color: #181825;
+}
+"""
+
 CONVERSIONS = {
     "PDF": ["png", "jpg", "jpeg", "txt"],
     "Image": ["png", "jpg", "jpeg", "webp", "bmp", "gif"],
     "DOCX": ["txt", "md"],
     "TXT": ["docx", "md"],
-    "MD": ["txt", "docx"]
+    "MD": ["txt", "docx", "html", "pdf"],
+    "HTML": ["pdf", "txt", "md"]
 }
 
 class ConvertWorker(QThread):
-    """Background thread to handle file conversions."""
     progress = Signal(int)
     finished = Signal(str)
     error = Signal(str)
@@ -39,14 +124,10 @@ class ConvertWorker(QThread):
         try:
             base_name = os.path.splitext(os.path.basename(self.input_file))[0]
 
-            # ==========================================
-            # 1. PDF CONVERSIONS
-            # ==========================================
             if self.source_format == "PDF":
                 doc = fitz.open(self.input_file)
                 total_pages = len(doc)
 
-                # PDF to Text
                 if self.target_format == "txt":
                     text_content = ""
                     for i in range(total_pages):
@@ -58,22 +139,18 @@ class ConvertWorker(QThread):
                         f.write(text_content)
                     self.finished.emit("PDF successfully extracted to Text!")
 
-                # PDF to Image(s)
                 elif self.target_format in ["png", "jpg", "jpeg"]:
                     if total_pages > 1:
-                        # Output as ZIP
                         zip_path = os.path.join(self.output_dir, f"{base_name}_images.zip")
                         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                             for i in range(total_pages):
                                 page = doc.load_page(i)
                                 pix = page.get_pixmap(dpi=300)
-                                # fitz tobytes supports png, jpeg, etc.
                                 img_data = pix.tobytes(self.target_format)
                                 zipf.writestr(f"{base_name}_page_{i+1}.{self.target_format}", img_data)
                                 self.progress.emit(int(((i + 1) / total_pages) * 100))
                         self.finished.emit("Multiple PDF pages successfully zipped as images!")
                     else:
-                        # Output single image
                         page = doc.load_page(0)
                         pix = page.get_pixmap(dpi=300)
                         out_path = os.path.join(self.output_dir, f"{base_name}.{self.target_format}")
@@ -82,9 +159,6 @@ class ConvertWorker(QThread):
                         self.finished.emit("Single PDF page successfully converted to image!")
                 doc.close()
 
-            # ==========================================
-            # 2. IMAGE CONVERSIONS
-            # ==========================================
             elif self.source_format == "Image":
                 with Image.open(self.input_file) as img:
                     if self.target_format in ['jpg', 'jpeg'] and img.mode in ('RGBA', 'LA', 'P'):
@@ -94,9 +168,6 @@ class ConvertWorker(QThread):
                     self.progress.emit(100)
                     self.finished.emit(f"Image converted to {self.target_format.upper()}!")
 
-            # ==========================================
-            # 3. DOCX CONVERSIONS
-            # ==========================================
             elif self.source_format == "DOCX":
                 doc = docx.Document(self.input_file)
                 text_content = "\n".join([p.text for p in doc.paragraphs])
@@ -107,10 +178,7 @@ class ConvertWorker(QThread):
                 self.progress.emit(100)
                 self.finished.emit(f"DOCX converted to {self.target_format.upper()}!")
 
-            # ==========================================
-            # 4. TEXT / MARKDOWN CONVERSIONS
-            # ==========================================
-            elif self.source_format in ["TXT", "MD"]:
+            elif self.source_format in ["TXT", "MD", "HTML"]:
                 with open(self.input_file, 'r', encoding='utf-8') as f:
                     text_content = f.read()
 
@@ -119,8 +187,24 @@ class ConvertWorker(QThread):
                     doc.add_paragraph(text_content)
                     out_path = os.path.join(self.output_dir, f"{base_name}.docx")
                     doc.save(out_path)
+                
+                elif self.target_format == "html" and self.source_format == "MD":
+                    html_content = markdown.markdown(text_content)
+                    out_path = os.path.join(self.output_dir, f"{base_name}.html")
+                    with open(out_path, 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+
+                elif self.target_format == "pdf" and self.source_format in ["MD", "HTML"]:
+                    if self.source_format == "MD":
+                        html_content = markdown.markdown(text_content)
+                    else:
+                        html_content = text_content
+                        
+                    out_path = os.path.join(self.output_dir, f"{base_name}.pdf")
+                    with open(out_path, "wb") as pdf_file:
+                        pisa.CreatePDF(html_content, dest=pdf_file)
+
                 else:
-                    # Simple text-to-text / text-to-md save
                     out_path = os.path.join(self.output_dir, f"{base_name}.{self.target_format}")
                     with open(out_path, 'w', encoding='utf-8') as f:
                         f.write(text_content)
@@ -135,85 +219,145 @@ class ConvertWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FormatForge - Advanced File Converter")
-        self.resize(500, 350)
+        self.setWindowTitle("AnyDoc - Universal File Converter")
+        self.resize(550, 480)
         self.input_file = None
         self.output_dir = None
+        self.custom_output_dir = False 
+        
         self.init_ui()
 
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # File Selection
-        self.lbl_file = QLabel("No file selected.")
+        # --- Instructions (Replaced Top Header) ---
+        lbl_instructions = QLabel("Select a file to convert, verify the format settings, and click Start Conversion.")
+        lbl_instructions.setWordWrap(True)
+        lbl_instructions.setStyleSheet("font-size: 14px; color: #cdd6f4; margin-bottom: 5px;")
+        main_layout.addWidget(lbl_instructions)
+
+        # --- File Selection Zone ---
+        self.file_frame = QFrame()
+        self.file_frame.setObjectName("dropZone")
+        file_layout = QVBoxLayout(self.file_frame)
+        file_layout.setContentsMargins(15, 20, 15, 20)
+        
+        self.lbl_file_icon = QLabel()
+        self.lbl_file_icon.setPixmap(qta.icon('fa5s.file-alt', color='#6c7086').pixmap(QSize(40, 40)))
+        self.lbl_file_icon.setAlignment(Qt.AlignCenter)
+        file_layout.addWidget(self.lbl_file_icon)
+
+        self.lbl_file = QLabel("No file selected")
         self.lbl_file.setAlignment(Qt.AlignCenter)
-        self.lbl_file.setStyleSheet("padding: 10px; border: 1px dashed #aaa;")
-        layout.addWidget(self.lbl_file)
+        self.lbl_file.setStyleSheet("color: #a6adc8;")
+        file_layout.addWidget(self.lbl_file)
 
-        btn_select_file = QPushButton("Select File")
+        btn_select_file = QPushButton(" Browse Files")
+        btn_select_file.setIcon(qta.icon('fa5s.folder-open', color='#cdd6f4'))
+        btn_select_file.setCursor(Qt.PointingHandCursor)
         btn_select_file.clicked.connect(self.select_file)
-        layout.addWidget(btn_select_file)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_select_file)
+        btn_layout.addStretch()
+        file_layout.addLayout(btn_layout)
+        
+        main_layout.addWidget(self.file_frame)
 
-        # Source Format Override
-        layout.addWidget(QLabel("Source Format (Auto-detected, but you can change it):"))
+        # --- Settings Group ---
+        settings_group = QGroupBox("Conversion Settings")
+        settings_layout = QVBoxLayout(settings_group)
+        settings_layout.setSpacing(10)
+
+        # Formats
+        format_layout = QHBoxLayout()
+        
         self.combo_source = QComboBox()
-        self.combo_source.addItems(["Auto-Detecting..."] + list(CONVERSIONS.keys()))
+        self.combo_source.addItems(["Detecting..."] + list(CONVERSIONS.keys()))
         self.combo_source.setEnabled(False)
         self.combo_source.currentTextChanged.connect(self.update_target_formats)
-        layout.addWidget(self.combo_source)
-
-        # Target Format Selection
-        layout.addWidget(QLabel("Select Target Format:"))
+        
         self.combo_target = QComboBox()
         self.combo_target.setEnabled(False)
-        layout.addWidget(self.combo_target)
 
-        # Output Directory
-        self.lbl_dir = QLabel("Output Folder: Not selected")
-        layout.addWidget(self.lbl_dir)
+        format_layout.addWidget(QLabel("Source:"))
+        format_layout.addWidget(self.combo_source, 1)
         
-        btn_select_dir = QPushButton("Select Output Folder")
-        btn_select_dir.clicked.connect(self.select_output_dir)
-        layout.addWidget(btn_select_dir)
+        arrow_lbl = QLabel()
+        arrow_lbl.setPixmap(qta.icon('fa5s.arrow-right', color='#6c7086').pixmap(QSize(16, 16)))
+        format_layout.addWidget(arrow_lbl)
+        
+        format_layout.addWidget(QLabel("Target:"))
+        format_layout.addWidget(self.combo_target, 1)
+        
+        settings_layout.addLayout(format_layout)
 
-        # Progress Bar
+        # Output Dir
+        dir_layout = QHBoxLayout()
+        self.lbl_dir = QLabel("Output: Same as source folder")
+        self.lbl_dir.setStyleSheet("color: #a6adc8; font-style: italic;")
+        
+        btn_select_dir = QPushButton()
+        btn_select_dir.setIcon(qta.icon('fa5s.folder', color='#cdd6f4'))
+        btn_select_dir.setToolTip("Select Custom Output Folder")
+        btn_select_dir.setCursor(Qt.PointingHandCursor)
+        btn_select_dir.clicked.connect(self.select_output_dir)
+        
+        dir_layout.addWidget(self.lbl_dir, 1)
+        dir_layout.addWidget(btn_select_dir)
+        settings_layout.addLayout(dir_layout)
+
+        main_layout.addWidget(settings_group)
+
+        # --- Bottom Area ---
+        main_layout.addStretch()
+
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(10)
+        main_layout.addWidget(self.progress_bar)
 
-        # Convert Button
-        self.btn_convert = QPushButton("Convert")
+        self.btn_convert = QPushButton("Start Conversion")
+        self.btn_convert.setObjectName("convertBtn")
         self.btn_convert.setEnabled(False)
-        self.btn_convert.setStyleSheet("background-color: #2b5797; color: white; padding: 10px;")
+        self.btn_convert.setCursor(Qt.PointingHandCursor)
         self.btn_convert.clicked.connect(self.start_conversion)
-        layout.addWidget(self.btn_convert)
+        main_layout.addWidget(self.btn_convert)
+
 
     def select_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Convert")
         if file_path:
             self.input_file = file_path
-            self.lbl_file.setText(f"Selected: {os.path.basename(file_path)}")
+            self.lbl_file.setText(f"<b>{os.path.basename(file_path)}</b>")
+            self.lbl_file_icon.setPixmap(qta.icon('fa5s.check-circle', color='#a6e3a1').pixmap(QSize(40, 40)))
             
-            if not self.output_dir:
+            if not self.custom_output_dir:
                 self.output_dir = os.path.dirname(file_path)
-                self.lbl_dir.setText(f"Output Folder: {self.output_dir}")
-
+                
             self.detect_file_type()
 
     def select_output_dir(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if dir_path:
             self.output_dir = dir_path
-            self.lbl_dir.setText(f"Output Folder: {self.output_dir}")
+            self.custom_output_dir = True 
+            
+            # Truncate long paths for visual cleanliness
+            display_path = dir_path if len(dir_path) < 40 else "..." + dir_path[-37:]
+            self.lbl_dir.setText(f"Output: {display_path}")
 
     def detect_file_type(self):
         self.combo_source.setEnabled(True)
         kind = filetype.guess(self.input_file)
         ext = os.path.splitext(self.input_file)[1].lower()
 
-        # Combine magic numbers (filetype) and extension fallback
         detected_type = None
         if kind and "pdf" in kind.mime:
             detected_type = "PDF"
@@ -227,17 +371,18 @@ class MainWindow(QMainWindow):
             detected_type = "DOCX"
         elif ext == ".md":
             detected_type = "MD"
+        elif ext in [".htm", ".html"]:
+            detected_type = "HTML"
         elif ext == ".txt":
             detected_type = "TXT"
 
         if detected_type:
-            # Set the dropdown to the detected type
             index = self.combo_source.findText(detected_type)
             if index >= 0:
                 self.combo_source.setCurrentIndex(index)
         else:
             QMessageBox.warning(self, "Unknown File", "Could not reliably detect file type. Please manually select the Source Format.")
-            self.combo_source.setCurrentIndex(1) # Default to first valid item (PDF)
+            self.combo_source.setCurrentIndex(1)
 
     def update_target_formats(self, source_format):
         self.combo_target.clear()
@@ -254,6 +399,7 @@ class MainWindow(QMainWindow):
         target_fmt = self.combo_target.currentText()
         
         self.btn_convert.setEnabled(False)
+        self.btn_convert.setText("  Converting...")
         self.progress_bar.setValue(0)
 
         self.worker = ConvertWorker(self.input_file, self.output_dir, source_fmt, target_fmt)
@@ -267,16 +413,27 @@ class MainWindow(QMainWindow):
 
     def conversion_finished(self, msg):
         self.btn_convert.setEnabled(True)
+        self.btn_convert.setText("  Start Conversion")
+        self.progress_bar.setValue(100)
         QMessageBox.information(self, "Success", msg)
+        self.progress_bar.setValue(0)
 
     def conversion_error(self, err_msg):
         self.btn_convert.setEnabled(True)
+        self.btn_convert.setText("  Start Conversion")
         QMessageBox.critical(self, "Error", f"An error occurred:\n{err_msg}")
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    
+    # Apply global stylesheet
+    app.setStyleSheet(STYLESHEET)
+    
+    # Set global default font
+    font = QFont("Segoe UI", 10)
+    app.setFont(font)
+    
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

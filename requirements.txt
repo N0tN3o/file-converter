@@ -5,3 +5,4 @@ Pillow
 python-docx
 markdown
 xhtml2pdf
+QtAwesome
