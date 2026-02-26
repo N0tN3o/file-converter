@@ -99,13 +99,16 @@ QProgressBar::chunk {
 }
 """
 
+CODE_EXTS = ["py", "js", "c", "cpp", "cs", "java", "json", "css", "html"]
+
 CONVERSIONS = {
     "PDF": ["png", "jpg", "jpeg", "txt"],
     "Image": ["png", "jpg", "jpeg", "webp", "bmp", "gif"],
     "DOCX": ["txt", "md"],
-    "TXT": ["docx", "md"],
+    "TXT": ["docx", "md"] + CODE_EXTS,
     "MD": ["txt", "docx", "html", "pdf"],
-    "HTML": ["pdf", "txt", "md"]
+    "HTML": ["pdf", "txt", "md"],
+    "Code": ["txt", "md", "docx"] 
 }
 
 class ConvertWorker(QThread):
@@ -178,7 +181,7 @@ class ConvertWorker(QThread):
                 self.progress.emit(100)
                 self.finished.emit(f"DOCX converted to {self.target_format.upper()}!")
 
-            elif self.source_format in ["TXT", "MD", "HTML"]:
+            elif self.source_format in ["TXT", "MD", "HTML", "Code"]:
                 with open(self.input_file, 'r', encoding='utf-8') as f:
                     text_content = f.read()
 
@@ -223,7 +226,8 @@ class MainWindow(QMainWindow):
         self.resize(550, 480)
         self.input_file = None
         self.output_dir = None
-        self.custom_output_dir = False 
+        self.custom_output_dir = False
+        self.setAcceptDrops(True)
         
         self.init_ui()
 
@@ -256,6 +260,11 @@ class MainWindow(QMainWindow):
         self.lbl_file.setStyleSheet("color: #a6adc8;")
         file_layout.addWidget(self.lbl_file)
 
+        self.lbl_drop_hint = QLabel("or drag && drop a file here")
+        self.lbl_drop_hint.setAlignment(Qt.AlignCenter)
+        self.lbl_drop_hint.setStyleSheet("color: #585b70; font-size: 11px; font-style: italic;")
+        file_layout.addWidget(self.lbl_drop_hint)
+
         btn_select_file = QPushButton(" Browse Files")
         btn_select_file.setIcon(qta.icon('fa5s.folder-open', color='#cdd6f4'))
         btn_select_file.setCursor(Qt.PointingHandCursor)
@@ -278,7 +287,7 @@ class MainWindow(QMainWindow):
         format_layout = QHBoxLayout()
         
         self.combo_source = QComboBox()
-        self.combo_source.addItems(["Detecting..."] + list(CONVERSIONS.keys()))
+        self.combo_source.addItems(list(CONVERSIONS.keys()))
         self.combo_source.setEnabled(False)
         self.combo_source.currentTextChanged.connect(self.update_target_formats)
         
@@ -331,17 +340,45 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.btn_convert)
 
 
+    # --- Drag & Drop Events ---
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.file_frame.setStyleSheet(
+                "#dropZone { border: 2px dashed #89b4fa; border-radius: 10px; background-color: #1e1e2e; }"
+            )
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self.file_frame.setStyleSheet("")
+
+    def dropEvent(self, event):
+        self.file_frame.setStyleSheet("")
+        urls = event.mimeData().urls()
+        if urls:
+            file_path = urls[0].toLocalFile()
+            if os.path.isfile(file_path):
+                self.load_file(file_path)
+
+    # --- File Handling ---
     def select_file(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Convert")
         if file_path:
-            self.input_file = file_path
-            self.lbl_file.setText(f"<b>{os.path.basename(file_path)}</b>")
-            self.lbl_file_icon.setPixmap(qta.icon('fa5s.check-circle', color='#a6e3a1').pixmap(QSize(40, 40)))
-            
-            if not self.custom_output_dir:
-                self.output_dir = os.path.dirname(file_path)
-                
-            self.detect_file_type()
+            self.load_file(file_path)
+
+    def load_file(self, file_path):
+        """Shared logic for both browsing and drag-and-drop"""
+        self.input_file = file_path
+        self.lbl_file.setText(f"<b>{os.path.basename(file_path)}</b>")
+        self.lbl_file_icon.setPixmap(qta.icon('fa5s.check-circle', color='#a6e3a1').pixmap(QSize(40, 40)))
+        
+        if not self.custom_output_dir:
+            self.output_dir = os.path.dirname(file_path)
+
+        self.detect_file_type()
 
     def select_output_dir(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
@@ -355,6 +392,7 @@ class MainWindow(QMainWindow):
 
     def detect_file_type(self):
         self.combo_source.setEnabled(True)
+        self.lbl_drop_hint.setVisible(False)
         kind = filetype.guess(self.input_file)
         ext = os.path.splitext(self.input_file)[1].lower()
 
@@ -375,6 +413,8 @@ class MainWindow(QMainWindow):
             detected_type = "HTML"
         elif ext == ".txt":
             detected_type = "TXT"
+        elif ext.replace(".", "") in CODE_EXTS:
+            detected_type = "Code"
 
         if detected_type:
             index = self.combo_source.findText(detected_type)
@@ -382,8 +422,7 @@ class MainWindow(QMainWindow):
                 self.combo_source.setCurrentIndex(index)
         else:
             QMessageBox.warning(self, "Unknown File", "Could not reliably detect file type. Please manually select the Source Format.")
-            self.combo_source.setCurrentIndex(1)
-
+            self.combo_source.setCurrentIndex(0)
     def update_target_formats(self, source_format):
         self.combo_target.clear()
         if source_format in CONVERSIONS:
