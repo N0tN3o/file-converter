@@ -15,10 +15,10 @@ from PySide6.QtWidgets import (
     QGroupBox, QFrame
 )
 from PySide6.QtCore import QThread, Signal, Qt, QSize
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QFont, QIcon, QStyleHints
 
-# --- Modern Dark Theme Stylesheet ---
-STYLESHEET = """
+# --- Theme Stylesheets ---
+DARK_STYLESHEET = """
 QMainWindow {
     background-color: #1e1e2e;
 }
@@ -98,6 +98,113 @@ QProgressBar::chunk {
     background-color: #181825;
 }
 """
+
+LIGHT_STYLESHEET = """
+QMainWindow {
+    background-color: #eff1f5;
+}
+QLabel {
+    color: #4c4f69;
+    font-size: 13px;
+}
+QGroupBox {
+    color: #5c5f77;
+    border: 1px solid #ccd0da;
+    border-radius: 8px;
+    margin-top: 12px;
+    font-weight: bold;
+    padding-top: 15px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 15px;
+    padding: 0 5px;
+}
+QPushButton {
+    background-color: #ccd0da;
+    color: #4c4f69;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-weight: bold;
+    border: none;
+}
+QPushButton:hover {
+    background-color: #bcc0cc;
+}
+QPushButton#convertBtn {
+    background-color: #1e66f5;
+    color: #eff1f5;
+    font-size: 15px;
+    padding: 12px;
+    border-radius: 8px;
+}
+QPushButton#convertBtn:hover {
+    background-color: #7287fd;
+}
+QPushButton#convertBtn:disabled {
+    background-color: #ccd0da;
+    color: #9ca0b0;
+}
+QComboBox {
+    background-color: #ccd0da;
+    color: #4c4f69;
+    border-radius: 4px;
+    padding: 6px 10px;
+    border: 1px solid #bcc0cc;
+}
+QComboBox:disabled {
+    background-color: #e6e9ef;
+    color: #9ca0b0;
+    border: 1px solid #ccd0da;
+}
+QComboBox::drop-down {
+    border: none;
+}
+QProgressBar {
+    border: 1px solid #ccd0da;
+    border-radius: 6px;
+    text-align: center;
+    color: #4c4f69;
+    background-color: #e6e9ef;
+    font-weight: bold;
+}
+QProgressBar::chunk {
+    background-color: #40a02b;
+    border-radius: 5px;
+}
+#dropZone {
+    border: 2px dashed #bcc0cc;
+    border-radius: 10px;
+    background-color: #e6e9ef;
+}
+"""
+
+# Icon color palettes per theme
+THEME_COLORS = {
+    "dark": {
+        "text": "#cdd6f4",
+        "subtext": "#a6adc8",
+        "overlay": "#6c7086",
+        "muted": "#585b70",
+        "green": "#a6e3a1",
+        "blue": "#89b4fa",
+        "surface": "#181825",
+        "drop_bg": "#1e1e2e",
+        "instructions": "#cdd6f4",
+    },
+    "light": {
+        "text": "#4c4f69",
+        "subtext": "#6c6f85",
+        "overlay": "#9ca0b0",
+        "muted": "#9ca0b0",
+        "green": "#40a02b",
+        "blue": "#1e66f5",
+        "surface": "#e6e9ef",
+        "drop_bg": "#dce0e8",
+        "instructions": "#4c4f69",
+    },
+}
 
 CODE_EXTS = ["py", "js", "c", "cpp", "cs", "java", "json", "css", "html"]
 
@@ -227,9 +334,12 @@ class MainWindow(QMainWindow):
         self.input_file = None
         self.output_dir = None
         self.custom_output_dir = False
+        self.is_dark = True
         self.setAcceptDrops(True)
         
         self.init_ui()
+        self._detect_and_apply_theme()
+        self._connect_theme_signal()
 
     def init_ui(self):
         central_widget = QWidget()
@@ -239,10 +349,9 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
 
         # --- Instructions (Replaced Top Header) ---
-        lbl_instructions = QLabel("Select a file to convert, verify the format settings, and click Start Conversion.")
-        lbl_instructions.setWordWrap(True)
-        lbl_instructions.setStyleSheet("font-size: 14px; color: #cdd6f4; margin-bottom: 5px;")
-        main_layout.addWidget(lbl_instructions)
+        self.lbl_instructions = QLabel("Select a file to convert, verify the format settings, and click Start Conversion.")
+        self.lbl_instructions.setWordWrap(True)
+        main_layout.addWidget(self.lbl_instructions)
 
         # --- File Selection Zone ---
         self.file_frame = QFrame()
@@ -251,28 +360,24 @@ class MainWindow(QMainWindow):
         file_layout.setContentsMargins(15, 20, 15, 20)
         
         self.lbl_file_icon = QLabel()
-        self.lbl_file_icon.setPixmap(qta.icon('fa5s.file-alt', color='#6c7086').pixmap(QSize(40, 40)))
         self.lbl_file_icon.setAlignment(Qt.AlignCenter)
         file_layout.addWidget(self.lbl_file_icon)
 
         self.lbl_file = QLabel("No file selected")
         self.lbl_file.setAlignment(Qt.AlignCenter)
-        self.lbl_file.setStyleSheet("color: #a6adc8;")
         file_layout.addWidget(self.lbl_file)
 
         self.lbl_drop_hint = QLabel("or drag && drop a file here")
         self.lbl_drop_hint.setAlignment(Qt.AlignCenter)
-        self.lbl_drop_hint.setStyleSheet("color: #585b70; font-size: 11px; font-style: italic;")
         file_layout.addWidget(self.lbl_drop_hint)
 
-        btn_select_file = QPushButton(" Browse Files")
-        btn_select_file.setIcon(qta.icon('fa5s.folder-open', color='#cdd6f4'))
-        btn_select_file.setCursor(Qt.PointingHandCursor)
-        btn_select_file.clicked.connect(self.select_file)
+        self.btn_select_file = QPushButton(" Browse Files")
+        self.btn_select_file.setCursor(Qt.PointingHandCursor)
+        self.btn_select_file.clicked.connect(self.select_file)
         
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        btn_layout.addWidget(btn_select_file)
+        btn_layout.addWidget(self.btn_select_file)
         btn_layout.addStretch()
         file_layout.addLayout(btn_layout)
         
@@ -297,9 +402,8 @@ class MainWindow(QMainWindow):
         format_layout.addWidget(QLabel("Source:"))
         format_layout.addWidget(self.combo_source, 1)
         
-        arrow_lbl = QLabel()
-        arrow_lbl.setPixmap(qta.icon('fa5s.arrow-right', color='#6c7086').pixmap(QSize(16, 16)))
-        format_layout.addWidget(arrow_lbl)
+        self.arrow_lbl = QLabel()
+        format_layout.addWidget(self.arrow_lbl)
         
         format_layout.addWidget(QLabel("Target:"))
         format_layout.addWidget(self.combo_target, 1)
@@ -311,14 +415,13 @@ class MainWindow(QMainWindow):
         self.lbl_dir = QLabel("Output: Same as source folder")
         self.lbl_dir.setStyleSheet("color: #a6adc8; font-style: italic;")
         
-        btn_select_dir = QPushButton()
-        btn_select_dir.setIcon(qta.icon('fa5s.folder', color='#cdd6f4'))
-        btn_select_dir.setToolTip("Select Custom Output Folder")
-        btn_select_dir.setCursor(Qt.PointingHandCursor)
-        btn_select_dir.clicked.connect(self.select_output_dir)
+        self.btn_select_dir = QPushButton()
+        self.btn_select_dir.setToolTip("Select Custom Output Folder")
+        self.btn_select_dir.setCursor(Qt.PointingHandCursor)
+        self.btn_select_dir.clicked.connect(self.select_output_dir)
         
         dir_layout.addWidget(self.lbl_dir, 1)
-        dir_layout.addWidget(btn_select_dir)
+        dir_layout.addWidget(self.btn_select_dir)
         settings_layout.addLayout(dir_layout)
 
         main_layout.addWidget(settings_group)
@@ -340,12 +443,74 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.btn_convert)
 
 
+    # --- Theme Management ---
+    def _detect_and_apply_theme(self):
+        """Detect the OS color scheme and apply the matching theme."""
+        try:
+            scheme = QApplication.instance().styleHints().colorScheme()
+            self.is_dark = (scheme == Qt.ColorScheme.Dark)
+        except AttributeError:
+            # Qt < 6.5 fallback: assume dark
+            self.is_dark = True
+        self._apply_theme()
+
+    def _connect_theme_signal(self):
+        """Connect to the OS theme-change signal for live switching."""
+        try:
+            QApplication.instance().styleHints().colorSchemeChanged.connect(
+                self._on_system_theme_changed
+            )
+        except AttributeError:
+            pass  # Qt < 6.5, no reactive support
+
+    def _on_system_theme_changed(self, scheme):
+        self.is_dark = (scheme == Qt.ColorScheme.Dark)
+        self._apply_theme()
+
+    def _apply_theme(self):
+        """Apply current theme stylesheet and refresh all themed icons."""
+        c = THEME_COLORS["dark" if self.is_dark else "light"]
+        QApplication.instance().setStyleSheet(
+            DARK_STYLESHEET if self.is_dark else LIGHT_STYLESHEET
+        )
+
+        # Instruction label
+        self.lbl_instructions.setStyleSheet(
+            f"font-size: 14px; color: {c['instructions']}; margin-bottom: 5px;"
+        )
+
+        # File icon (show check if a file is loaded, otherwise default)
+        if self.input_file:
+            self.lbl_file_icon.setPixmap(
+                qta.icon('fa5s.check-circle', color=c['green']).pixmap(QSize(40, 40))
+            )
+        else:
+            self.lbl_file_icon.setPixmap(
+                qta.icon('fa5s.file-alt', color=c['overlay']).pixmap(QSize(40, 40))
+            )
+
+        # Text labels
+        self.lbl_file.setStyleSheet(f"color: {c['subtext']};")
+        self.lbl_drop_hint.setStyleSheet(
+            f"color: {c['muted']}; font-size: 11px; font-style: italic;"
+        )
+        self.lbl_dir.setStyleSheet(f"color: {c['subtext']}; font-style: italic;")
+
+        # Buttons / icons
+        self.btn_select_file.setIcon(qta.icon('fa5s.folder-open', color=c['text']))
+        self.btn_select_dir.setIcon(qta.icon('fa5s.folder', color=c['text']))
+        self.arrow_lbl.setPixmap(
+            qta.icon('fa5s.arrow-right', color=c['overlay']).pixmap(QSize(16, 16))
+        )
+
     # --- Drag & Drop Events ---
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+            c = THEME_COLORS["dark" if self.is_dark else "light"]
             self.file_frame.setStyleSheet(
-                "#dropZone { border: 2px dashed #89b4fa; border-radius: 10px; background-color: #1e1e2e; }"
+                f"#dropZone {{ border: 2px dashed {c['blue']}; border-radius: 10px; "
+                f"background-color: {c['drop_bg']}; }}"
             )
 
     def dragMoveEvent(self, event):
@@ -373,7 +538,8 @@ class MainWindow(QMainWindow):
         """Shared logic for both browsing and drag-and-drop"""
         self.input_file = file_path
         self.lbl_file.setText(f"<b>{os.path.basename(file_path)}</b>")
-        self.lbl_file_icon.setPixmap(qta.icon('fa5s.check-circle', color='#a6e3a1').pixmap(QSize(40, 40)))
+        c = THEME_COLORS["dark" if self.is_dark else "light"]
+        self.lbl_file_icon.setPixmap(qta.icon('fa5s.check-circle', color=c['green']).pixmap(QSize(40, 40)))
         
         if not self.custom_output_dir:
             self.output_dir = os.path.dirname(file_path)
@@ -466,8 +632,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     
-    # Apply global stylesheet
-    app.setStyleSheet(STYLESHEET)
+    # Stylesheet is applied by MainWindow._apply_theme()
     
     # Set global default font
     font = QFont("Segoe UI", 10)
